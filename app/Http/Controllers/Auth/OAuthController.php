@@ -2,8 +2,9 @@
 
 namespace App\Http\Controllers\Auth;
 
-use App\User;
-use App\OAuthProvider;
+use App\Models\User;
+use App\Models\SocialLogin;
+use App\Models\OauthProvider;
 use App\Http\Controllers\Controller;
 use App\Exceptions\EmailTakenException;
 use Laravel\Socialite\Facades\Socialite;
@@ -14,28 +15,37 @@ class OAuthController extends Controller
     use AuthenticatesUsers;
 
     /**
-     * Create a new controller instance.
+     * Collection of enabled OauthProviders.
      *
-     * @return void
+     * @var \Illuminate\Database\Eloquent\Collection
      */
+    protected $enabledProviders;
+
     public function __construct()
     {
-        config([
-            'services.github.redirect' => route('oauth.callback', 'github'),
-        ]);
+        $enabledProviders = OauthProvider::enabled()->get();
+
+        foreach ($enabledProviders as $provider) {
+            config([
+                "services.{$provider->name}" => [
+                    'client_id' => $provider->client_id,
+                    'client_secret' => $provider->client_secret,
+                    'redirect' => route('oauth.callback', $provider->name),
+                ],
+            ]);
+        }
     }
 
     /**
-     * Redirect the user to the provider authentication page.
+     * Get the redirect uri for the provider.
      *
-     * @param  string $provider
-     * @return \Illuminate\Http\RedirectResponse
+     * @param string $provider
      */
-    public function redirectToProvider($provider)
+    public function getRedirectUri($provider): \Illuminate\Http\JsonResponse
     {
-        return [
+        return response()->json([
             'url' => Socialite::driver($provider)->stateless()->redirect()->getTargetUrl(),
-        ];
+        ]);
     }
 
     /**
@@ -49,14 +59,14 @@ class OAuthController extends Controller
         $user = Socialite::driver($provider)->stateless()->user();
         $user = $this->findOrCreateUser($provider, $user);
 
-        $this->guard()->setToken(
-            $token = $this->guard()->login($user)
+        auth()->guard()->setToken(
+            $token = auth()->guard()->login($user)
         );
 
         return view('oauth/callback', [
             'token' => $token,
             'token_type' => 'bearer',
-            'expires_in' => $this->guard()->getPayload()->get('exp') - time(),
+            'expires_in' => auth()->guard()->getPayload()->get('exp') - time(),
         ]);
     }
 
@@ -65,26 +75,26 @@ class OAuthController extends Controller
      * @param  \Laravel\Socialite\Contracts\User $sUser
      * @return \App\User|false
      */
-    protected function findOrCreateUser($provider, $user)
+    protected function findOrCreateUser($provider, $sUser)
     {
-        $oauthProvider = OAuthProvider::where('provider', $provider)
-            ->where('provider_user_id', $user->getId())
-            ->first();
+        $provider = OauthProvider::where('name', $provider)->first();
 
-        if ($oauthProvider) {
-            $oauthProvider->update([
-                'access_token' => $user->token,
-                'refresh_token' => $user->refreshToken,
+        $socialLogin = $provider->socialLogins()->where('provider_user_id', $sUser->getId())->first();
+
+        if ($socialLogin) {
+            $socialLogin->update([
+                'access_token' => $sUser->token,
+                'refresh_token' => $sUser->refreshToken,
             ]);
 
-            return $oauthProvider->user;
+            return $socialLogin->user;
         }
 
-        if (User::where('email', $user->getEmail())->exists()) {
+        if (User::where('email', $sUser->getEmail())->exists()) {
             throw new EmailTakenException;
         }
 
-        return $this->createUser($provider, $user);
+        return $this->createUser($provider, $sUser);
     }
 
     /**
@@ -99,13 +109,32 @@ class OAuthController extends Controller
             'email' => $sUser->getEmail(),
         ]);
 
-        $user->oauthProviders()->create([
-            'provider' => $provider,
+        $sUserData = [
+            'id' => $sUser->getId(),
+            'name' => $sUser->getName(),
+            'username' => $sUser->getNickname(),
+            'email' => $sUser->getEmail(),
+            'avatar' => $sUser->getAvatar(),
+        ];
+
+        $user->socialLogins()->create([
+            'oauth_provider_id' => $provider->id,
             'provider_user_id' => $sUser->getId(),
+            'provider_user_data' => $sUserData,
+            'provider_is_public' => true,
             'access_token' => $sUser->token,
             'refresh_token' => $sUser->refreshToken,
         ]);
 
         return $user;
     }
+
+    // public function verifyProvider($provider)
+    // {
+    //     $provider = SocialLoginProvider::where('provider', $provider)->first();
+
+    //     if ($provider && !$provider->is_enabled) {
+    //         throw new OAuthProvider;
+    //     }
+    // }
 }
